@@ -4824,7 +4824,7 @@ html body #nav button[data-v="education"]{--nc:#F87171}
 <script id="v12-education-js">
 (function(){
   'use strict';
-  const DBN='media_platform_education_v1', MAX_BYTES=30*1024*1024, A3_RATIO=297/420;
+  const DBN='media_platform_education_v1', MAX_MB=500, MAX_BYTES=MAX_MB*1024*1024, A3_RATIO=297/420;
   const EDU={items:[],ready:false,filter:'all',db:null};
   const fmt=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round(n/1024))+' KB';
   const day=iso=>String(iso||'').slice(0,10);
@@ -4849,8 +4849,8 @@ html body #nav button[data-v="education"]{--nc:#F87171}
   async function load(){
     try{
       const rows=await dbAll();
-      EDU.items.forEach(i=>{ try{URL.revokeObjectURL(i.url);}catch(_){} });
-      EDU.items=(rows||[]).map(r=>{ if(r.kind==='pdf'&&r.blob&&r.blob.type!=='application/pdf') r.blob=new Blob([r.blob],{type:'application/pdf'}); return Object.assign(r,{url:URL.createObjectURL(r.blob)}); })
+      EDU.items.forEach(i=>{ try{URL.revokeObjectURL(i.url);}catch(_){} try{i.thumbUrl&&URL.revokeObjectURL(i.thumbUrl);}catch(_){} });
+      EDU.items=(rows||[]).map(r=>{ if(r.kind==='pdf'&&r.blob&&r.blob.type!=='application/pdf') r.blob=new Blob([r.blob],{type:'application/pdf'}); return Object.assign(r,{url:URL.createObjectURL(r.blob),thumbUrl:r.thumb&&r.kind==='image'?URL.createObjectURL(r.thumb):''}); })
         .sort((a,b)=>((a.kind==='image'?0:1)-(b.kind==='image'?0:1))||String(b.created).localeCompare(String(a.created)));
     }catch(e){ EDU.items=[]; EDU.error=true; }
     EDU.ready=true; renderEducation(); renderEducationAdmin();
@@ -4871,7 +4871,7 @@ html body #nav button[data-v="education"]{--nc:#F87171}
     const card=i=>{
       const meta=`<p><span>${ic('calendar')} ${esc(day(i.created))}</span><span>${esc(fmt(i.size))}</span></p>`;
       if(i.kind==='image') return `<article class="edu-card img">
-        <button class="edu-paper" type="button" data-preview="${esc(i.url)}" data-label="${esc(i.title)}" aria-label="عرض ${esc(i.title)}"><img src="${esc(i.url)}" alt="${esc(i.title)}" loading="lazy"><span class="edu-a3tag">A3</span></button>
+        <button class="edu-paper" type="button" data-preview="${esc(i.url)}" data-label="${esc(i.title)}" aria-label="عرض ${esc(i.title)}"><img src="${esc(i.thumbUrl||i.url)}" alt="${esc(i.title)}" loading="lazy" decoding="async"><span class="edu-a3tag">A3</span></button>
         <div class="edu-info"><h3>${esc(i.title)}</h3>${meta}</div>
         <div class="edu-actions"><button class="btn" type="button" data-preview="${esc(i.url)}" data-label="${esc(i.title)}">${ic('eye')}<span>عرض</span></button><button class="btn ghost" type="button" data-edusave="${i.id}">${ic('download')}<span>تنزيل</span></button></div></article>`;
       return `<article class="edu-card pdf">
@@ -4891,32 +4891,57 @@ html body #nav button[data-v="education"]{--nc:#F87171}
     return new Promise(res=>{ const u=URL.createObjectURL(file),im=new Image();
       im.onload=()=>{res({w:im.naturalWidth,h:im.naturalHeight});URL.revokeObjectURL(u);}; im.onerror=()=>{res(null);URL.revokeObjectURL(u);}; im.src=u; });
   }
+  /* مصغّرة صغيرة للصورة (تُحفظ مع الملف) + قياس الأبعاد دون الاحتفاظ بالصورة الكبيرة في الذاكرة */
+  async function imgInfo(file){
+    const T=600;
+    try{
+      const bmp=await createImageBitmap(file);
+      const w=bmp.width,h=bmp.height,k=Math.min(1,T/Math.max(w,h));
+      const cv=document.createElement('canvas'); cv.width=Math.max(1,Math.round(w*k)); cv.height=Math.max(1,Math.round(h*k));
+      cv.getContext('2d').drawImage(bmp,0,0,cv.width,cv.height); try{bmp.close();}catch(_){}
+      const thumb=await new Promise(r=>cv.toBlob(r,'image/jpeg',.82)); cv.width=cv.height=0;
+      return {w,h,thumb};
+    }catch(_){
+      const d=await imgSize(file); return d?{w:d.w,h:d.h,thumb:null}:null;
+    }
+  }
+  const tick=()=>new Promise(r=>setTimeout(r,0));
   window.eduUpload=async function(input){
     const files=[...(input.files||[])]; if(!files.length){ input.value=''; return; }
-    let ok=0, bad=0, off=0;
-    toast('جارٍ رفع '+files.length+' ملف ...');
-    for(const f0 of files){
-      const pdf=isPdf(f0), img=isImg(f0);
-      const f=f0;
+    try{ navigator.storage&&navigator.storage.persist&&navigator.storage.persist(); }catch(_){}
+    let ok=0, bad=0, off=0, n=0;
+    for(const f of files){
+      n++;
+      toast('جارٍ رفع '+n+' من '+files.length+' — '+f.name+' ('+fmt(f.size)+')');
+      await tick();
+      const pdf=isPdf(f), img=isImg(f);
       if(!pdf&&!img){ bad++; continue; }
-      if(f.size>MAX_BYTES){ bad++; toast('الملف «'+f.name+'» أكبر من 30MB','danger'); continue; }
-      let data;
-      try{ data=await f.arrayBuffer(); }catch(e){ bad++; toast('تعذر قراءة «'+f.name+'»','danger'); continue; }
-      if(pdf){ const head=new Uint8Array(data.slice(0,1024)); let sig=false; for(let k=0;k<head.length-4;k++){ if(head[k]===0x25&&head[k+1]===0x50&&head[k+2]===0x44&&head[k+3]===0x46){ sig=true; break; } } if(!sig){ bad++; toast('الملف «'+f.name+'» ليس PDF صالحاً','danger'); continue; } }
-      const blob=new Blob([data],{type:pdf?'application/pdf':(f.type||'image/jpeg')});
-      const rec={kind:pdf?'pdf':'image',title:f.name.replace(/\.[^.]+$/,''),name:f.name,mime:blob.type,size:blob.size,created:new Date().toISOString(),blob};
-      if(img){ const d=await imgSize(blob); if(!d){ bad++; continue; } rec.w=d.w; rec.h=d.h; rec.a3=Math.abs(d.w/d.h-A3_RATIO)<=0.04; if(!rec.a3) off++; }
+      if(f.size>MAX_BYTES){ bad++; toast('الملف «'+f.name+'» أكبر من '+MAX_MB+'MB','danger'); continue; }
+      /* لا نقرأ الملف كله: نفحص أول 1KB فقط، ثم يُحفظ الملف نفسه مباشرة دون نسخة ثانية في الذاكرة */
+      if(pdf){
+        let head; try{ head=new Uint8Array(await f.slice(0,1024).arrayBuffer()); }catch(e){ bad++; toast('تعذر قراءة «'+f.name+'»','danger'); continue; }
+        let sig=false; for(let k=0;k<head.length-4;k++){ if(head[k]===0x25&&head[k+1]===0x50&&head[k+2]===0x44&&head[k+3]===0x46){ sig=true; break; } }
+        if(!sig){ bad++; toast('الملف «'+f.name+'» ليس PDF صالحاً','danger'); continue; }
+      }
+      const type=pdf?'application/pdf':(f.type||'image/jpeg');
+      const blob=(f.type===type)?f:f.slice(0,f.size,type);
+      const rec={kind:pdf?'pdf':'image',title:f.name.replace(/\.[^.]+$/,''),name:f.name,mime:type,size:f.size,created:new Date().toISOString(),blob};
+      if(img){
+        const d=await imgInfo(blob); if(!d){ bad++; toast('تعذر قراءة الصورة «'+f.name+'»','danger'); continue; }
+        rec.w=d.w; rec.h=d.h; rec.a3=Math.abs(d.w/d.h-A3_RATIO)<=0.04; if(!rec.a3) off++; if(d.thumb) rec.thumb=d.thumb;
+      }
       try{ await dbPut(rec); ok++; }catch(e){ bad++; toast('تعذر حفظ «'+f.name+'»: مساحة التخزين قد تكون ممتلئة','danger'); }
+      await tick();
     }
     input.value='';
     await load();
     if(ok) toast('تمت إضافة '+ok+' ملف إلى قسم التعليم');
     if(off) toast(off+' صورة ليست بمقاس A3 عمودي — ستُعرض كاملة داخل إطار A3','danger');
-    if(bad&&!ok) toast('لم يُرفع أي ملف. المسموح: صور وPDF فقط (حتى 30MB)','danger');
+    if(bad&&!ok) toast('لم يُرفع أي ملف. المسموح: صور وPDF فقط (حتى '+MAX_MB+'MB)','danger');
   };
   window.eduRename=async function(id,v){
     const r=EDU.items.find(x=>x.id===id); if(!r) return;
-    r.title=String(v||'').trim()||r.name; try{ const {url,...rec}=r; await dbPut(rec); toast('تم حفظ العنوان'); }catch(e){ toast('تعذر حفظ العنوان','danger'); }
+    r.title=String(v||'').trim()||r.name; try{ const {url,thumbUrl,...rec}=r; await dbPut(rec); toast('تم حفظ العنوان'); }catch(e){ toast('تعذر حفظ العنوان','danger'); }
     renderEducation();
   };
   window.eduDelete=async function(id){
@@ -4927,10 +4952,10 @@ html body #nav button[data-v="education"]{--nc:#F87171}
     const box=document.getElementById('edu-admin'); if(!box) return;
     const all=EDU.items, imgs=all.filter(i=>i.kind==='image').length, total=all.reduce((n,i)=>n+(i.size||0),0);
     box.innerHTML=`<div class="st-actions-row"><label class="btn edu-up">${ic('upload')}<span>رفع صور / ملفات PDF</span><input id="edu-file" type="file" multiple accept="image/*,application/pdf,.pdf" onchange="eduUpload(this)"></label></div>
-      <div class="st-hint">الصور بمقاس A3 عمودي (297×420 مم)، ويُنصح بدقة 1754×2480 بكسل. الحد الأقصى 30MB للملف. تُحفظ الملفات فور رفعها.</div>
+      <div class="st-hint">الصور بمقاس A3 عمودي (297×420 مم)، ويُنصح بدقة 1754×2480 بكسل. الحد الأقصى ${MAX_MB}MB للملف، والملفات الكبيرة تُرفع دون تعليق. تُحفظ الملفات فور رفعها.</div>
       <div class="edu-adm-sum"><span class="mp-badge" data-t="accent">${all.length} عنصر</span><span class="mp-badge" data-t="info">${imgs} صورة</span><span class="mp-badge" data-t="warn">${all.length-imgs} PDF</span><span class="mp-badge" data-t="mute">${fmt(total)}</span></div>
       ${EDU.ready?(all.length?`<div class="edu-adm-list">${all.map(i=>`<div class="edu-adm-row">
-        <div class="edu-adm-thumb"${i.kind==='image'?'':` data-pdf="${i.id}" style="cursor:pointer"`}>${i.kind==='image'?`<img src="${esc(i.url)}" alt="">`:ic('pdf')}</div>
+        <div class="edu-adm-thumb"${i.kind==='image'?'':` data-pdf="${i.id}" style="cursor:pointer"`}>${i.kind==='image'?`<img src="${esc(i.thumbUrl||i.url)}" alt="" decoding="async">`:ic('pdf')}</div>
         <div class="edu-adm-main"><input type="text" value="${esc(i.title)}" maxlength="120" aria-label="عنوان العنصر" onchange="eduRename(${i.id},this.value)">
           <div class="edu-adm-meta"><span>${i.kind==='image'?'صورة':'PDF'}</span><span>${esc(fmt(i.size))}</span>${i.kind==='image'?`<span dir="ltr">${i.w}×${i.h}</span>`:''}${i.kind==='image'&&i.a3===false?'<span class="edu-warn">ليست بمقاس A3</span>':''}</div></div>
         <button class="icon-btn" type="button" onclick="eduDelete(${i.id})" title="حذف" aria-label="حذف">${ic('del')}</button></div>`).join('')}</div>`:'<div class="mp-note">لا يوجد محتوى بعد. ارفع الصور أو ملفات PDF لتظهر في قسم «التعليم».</div>'):'<div class="mp-note">جارٍ التحميل...</div>'}`;
@@ -4945,7 +4970,16 @@ html body #nav button[data-v="education"]{--nc:#F87171}
     _lib.catch(()=>{ _lib=null; });
     return _lib;
   }
-  async function openDoc(blob){ const lib=await pdfLib(); const data=new Uint8Array(await blob.arrayBuffer()); return lib.getDocument({data}).promise; }
+  async function openDoc(blob){
+    const lib=await pdfLib(); const u=URL.createObjectURL(blob);
+    try{
+      const task=lib.getDocument({url:u,disableAutoFetch:true,disableStream:false});
+      const doc=await task.promise; const d0=doc.destroy.bind(doc); doc.destroy=()=>{ try{URL.revokeObjectURL(u);}catch(_){} return d0(); }; return doc;
+    }catch(e){
+      try{URL.revokeObjectURL(u);}catch(_){}
+      const data=new Uint8Array(await blob.arrayBuffer()); return lib.getDocument({data}).promise;
+    }
+  }
   const V={ov:null,doc:null,zoom:1,blob:null,name:'',io:null,token:0};
   function pvClose(){
     if(!V.ov) return false;
@@ -5031,7 +5065,7 @@ html body #nav button[data-v="education"]{--nc:#F87171}
     const r=EDU.items.find(x=>String(x.id)===b.dataset.pdf); if(r) window.MMYPdf.open(r.blob,r.title||r.name);
   });
 
-  /* صورة مصغّرة للصفحة الأولى لكل PDF */
+  /* صورة مصغّرة للصفحة الأولى لكل PDF: تُولَّد مرة واحدة وتُحفظ، فلا يُعاد فتح الملف الكبير في كل مرة */
   let thumbBusy=false;
   async function queuePdfThumbs(root){
     if(thumbBusy) return; thumbBusy=true;
@@ -5039,13 +5073,21 @@ html body #nav button[data-v="education"]{--nc:#F87171}
       for(const btn of root.querySelectorAll('.edu-paper.pdf[data-pdf]')){
         if(btn.classList.contains('has-thumb')) continue;
         const r=EDU.items.find(x=>String(x.id)===btn.dataset.pdf); if(!r) continue;
+        const cv=btn.querySelector('canvas'); if(!cv) continue;
         try{
+          if(r.thumb){
+            const bmp=await createImageBitmap(r.thumb); cv.width=bmp.width; cv.height=bmp.height;
+            cv.getContext('2d').drawImage(bmp,0,0); try{bmp.close();}catch(_){}
+            btn.classList.add('has-thumb'); continue;
+          }
           const doc=await openDoc(r.blob), pg=await doc.getPage(1), v=pg.getViewport({scale:1}), k=Math.min(2,360/v.width);
-          const cv=btn.querySelector('canvas'); if(!cv){ doc.destroy(); continue; }
           const vp=pg.getViewport({scale:k}); cv.width=Math.floor(vp.width); cv.height=Math.floor(vp.height);
           await pg.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
-          btn.classList.add('has-thumb'); doc.destroy();
+          btn.classList.add('has-thumb');
+          try{ const tb=await new Promise(res=>cv.toBlob(res,'image/jpeg',.8)); if(tb){ r.thumb=tb; const {url,thumbUrl,...rec}=r; await dbPut(rec); } }catch(_){}
+          doc.destroy();
         }catch(_){ /* يبقى الرمز العام */ }
+        await tick();
       }
     }finally{ thumbBusy=false; }
   }
